@@ -78,6 +78,15 @@ python -m venv --system-site-packages .venv
 
 # 8) 幻觉抽检表（跑完 eval --out 之后）
 .\.venv\Scripts\python.exe -m src.sample_hallucination --detail results\eval_E004.jsonl --exp-id E004
+
+# 9) 扩到 240 题（v1 100 + v2 五段 140，需要 API key，约 14 分钟）
+.\.venv\Scripts\python.exe -m src.build_eval_set --version all   # -> eval/eval_set_all.jsonl
+.\.venv\Scripts\python.exe -m src.validate_eval --file eval\eval_set_all.jsonl --merge-check --expect 240
+.\.venv\Scripts\python.exe -m src.eval --set eval\eval_set_all.jsonl --retrieval rrf --judge --rerank --append-results E005
+.\.venv\Scripts\python.exe -m src.split_metrics --detail results\eval_E005.jsonl --md   # v1 / v2 拆开看
+
+# 10) 人工审计汇总（把 4 份 eval/audit/part*.jsonl 汇总成幻觉率）
+.\.venv\Scripts\python.exe -m src.aggregate_audit              # -> results/hallucination_summary.md
 ```
 
 ## 目录
