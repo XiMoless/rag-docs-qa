@@ -1,0 +1,75 @@
+# 垂直 RAG 问答项目 · 配置
+# 铁规矩：改任何一项都要在 results/RESULTS.md 新起一行，不覆盖旧行。
+
+project:
+  name: langchain-docs-qa
+  domain: LangChain 开源库文档（OSS，Python + JavaScript）
+  # 项目定义见 docs/项目定义.md
+
+corpus:
+  sitemap: https://docs.langchain.com/sitemap.xml
+  include_prefixes: ["https://docs.langchain.com/oss/"]   # 只取 OSS 文档，排除 langsmith 营销页与 API reference
+  exclude_prefixes: []
+  raw_dir: data/raw
+  processed_dir: data/processed
+  min_chars: 200
+  delay_sec: 0.25
+  workers: 4
+  user_agent: "Mozilla/5.0 (research crawler for offline QA evaluation)"
+
+chunking:
+  # fixed | heading
+  strategy: heading
+  size: 700          # 目标字符数（中英混合按字符计）
+  overlap: 120
+  min_chunk_chars: 80
+
+embedding:
+  # DeepSeek 没有 embedding 接口，用本地 bge-m3（RTX 4060 8GB 够用）
+  backend: local
+  model: BAAI/bge-m3
+  device: cuda
+  batch_size: 16
+  normalize: true
+
+index:
+  backend: faiss      # faiss | numpy
+  metric: ip          # ip + normalize = 余弦
+  path: index/langchain_docs.faiss
+
+bm25:
+  path: index/langchain_docs_bm25.json
+  k1: 1.5
+  b: 0.75
+
+retrieval:
+  top_k_retrieve: 20
+  top_k_context: 5
+  hybrid: rrf         # vec | bm25 | rrf
+  rrf_k: 60
+  rerank:
+    enabled: false
+    model: BAAI/bge-reranker-v2-m3
+    top_n: 5
+
+generation:
+  provider: deepseek
+  base_url: https://api.deepseek.com
+  model: deepseek-chat
+  temperature: 0.0
+  max_tokens: 1200
+  api_key_env: DEEPSEEK_API_KEY
+  prompt_version: v1
+
+judge:
+  provider: deepseek
+  base_url: https://api.deepseek.com
+  model: deepseek-chat
+  temperature: 0.0
+  api_key_env: DEEPSEEK_API_KEY
+
+eval:
+  set_dir: eval
+  recalls: [1, 5, 10]
+  no_answer_should_refuse: true
+  results_file: results/RESULTS.md
