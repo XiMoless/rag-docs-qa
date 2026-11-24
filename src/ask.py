@@ -160,7 +160,7 @@ def main() -> int:
             print(f"    {c['url']}")
 
     context = build_context(hits, r.chunks)
-    prompt = SYSTEM_PROMPT.format(context=context, question=question)
+    prompt = SYSTEM_PROMPT.format(context=context, question=args.question)
 
     client = OpenAI(
         api_key=os.environ["DEEPSEEK_API_KEY"],
