@@ -41,23 +41,29 @@ def _get() -> tuple[Retriever, object]:
     return _retriever, _client
 
 
-def answer(question: str, mode_label: str, k_context: int, expand: int):
+def answer(question: str, mode_label: str, k_context: int, expand: int, qe: bool):
     if not question.strip():
         raise gr.Error("先输入问题")
     r, client = _get()
     mode = RETRIEVAL_MODES.get(mode_label, "rrf")
+    kw_query = None
+    if qe:
+        from src.query_expand import expand as qe_expand
+
+        kw_query = qe_expand(question, client)
     if mode == "vec":
         hits = r.vector(question, int(k_context))
     elif mode == "bm25":
-        hits = r.keyword(question, int(k_context))
+        hits = r.keyword(kw_query or question, int(k_context))
     else:
-        hits = r.rrf(question, max(20, int(k_context)), int(k_context))
+        hits = r.rrf(question, max(20, int(k_context)), int(k_context), kw_query=kw_query)
 
     anchors = list(hits)
+    n_anchor = len(anchors)
     if int(expand) > 0:
-        hits = r.expand(hits, int(expand))
+        hits, n_anchor = r.expand(hits, int(expand))
 
-    context = build_context(hits, r.chunks)
+    context = build_context(hits, r.chunks, n_anchor=n_anchor)
     resp = client.chat.completions.create(
         model="deepseek-chat",
         messages=[{"role": "user", "content": SYSTEM_PROMPT.format(context=context, question=question)}],
@@ -73,7 +79,7 @@ def answer(question: str, mode_label: str, k_context: int, expand: int):
 
     usage = resp.usage
     meta = (
-        f"检索={mode_label} · 锚点 {len(anchors)} 段 + 邻接扩展 ±{int(expand)} → "
+        f"检索={mode_label} · 锚点 {n_anchor} 段 + 邻接扩展 ±{int(expand)} → "
         f"送入上下文 {len(hits)} 段 · tokens in {usage.prompt_tokens} / out {usage.completion_tokens}"
     )
     return text, src_rows, meta
@@ -89,14 +95,15 @@ with gr.Blocks(title="LangChain 文档 RAG 问答") as demo:
         mode = gr.Dropdown(list(RETRIEVAL_MODES), value="混合 RRF", label="检索方式", scale=1)
         k = gr.Slider(1, 10, value=5, step=1, label="送入上下文的片段数", scale=1)
         exp = gr.Slider(0, 2, value=1, step=1, label="邻接扩展（同页前后各几段）", scale=1)
+        qe = gr.Checkbox(value=True, label="查询改写（中文→英文关键词，修 BM25 中英错配）", scale=1)
     btn = gr.Button("提问", variant="primary")
     out = gr.Markdown(label="回答")
     meta = gr.Markdown()
     with gr.Accordion("检索结果（chunk 级可追溯）", open=False):
         table = gr.Dataframe(headers=["#", "score", "chunk_id", "标题路径", "url"], wrap=True)
 
-    btn.click(answer, inputs=[q, mode, k, exp], outputs=[out, table, meta])
-    q.submit(answer, inputs=[q, mode, k, exp], outputs=[out, table, meta])
+    btn.click(answer, inputs=[q, mode, k, exp, qe], outputs=[out, table, meta])
+    q.submit(answer, inputs=[q, mode, k, exp, qe], outputs=[out, table, meta])
 
 
 if __name__ == "__main__":

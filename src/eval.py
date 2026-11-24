@@ -82,6 +82,7 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="只算检索指标")
     ap.add_argument("--rerank", action="store_true", help="候选再走 cross-encoder 重排（bge-reranker-v2-m3）")
     ap.add_argument("--expand", type=int, default=0, help="邻接扩展：每个命中并入同页前后各 N 个 chunk（0=关）")
+    ap.add_argument("--query-expand", action="store_true", help="把中文问题改写成英文关键词后再走 BM25 通道（修复中英错配）")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--append-results", default="", help="把结果追加到 RESULTS.md，填实验 id")
     ap.add_argument("--out", default="", help="逐题明细落盘路径")
@@ -101,7 +102,7 @@ def main() -> int:
 
     r = Retriever()
     client = None
-    if args.judge:
+    if args.judge or args.query_expand:
         from openai import OpenAI
 
         client = OpenAI(api_key=os.environ["DEEPSEEK_API_KEY"], base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
@@ -112,12 +113,17 @@ def main() -> int:
 
     for n, q in enumerate(qs, 1):
         t0 = time.time()
+        kw_query = None
+        if args.query_expand:
+            from src.query_expand import expand as qe_expand
+
+            kw_query = qe_expand(q["question"], client)
         if args.retrieval == "vec":
             hits = r.vector(q["question"], args.k_retrieve)
         elif args.retrieval == "bm25":
-            hits = r.keyword(q["question"], args.k_retrieve)
+            hits = r.keyword(kw_query or q["question"], args.k_retrieve)
         else:
-            hits = r.rrf(q["question"], args.k_retrieve, args.k_retrieve)  # 融合后保留 k_retrieve 个候选，供 R@10/rerank 使用
+            hits = r.rrf(q["question"], args.k_retrieve, args.k_retrieve, kw_query=kw_query)  # 融合后保留 k_retrieve 个候选，供 R@10/rerank 使用
         if args.rerank:
             hits = r.rerank(q["question"], hits, args.k_retrieve)
         ranked_ids = [r.chunks[i]["chunk_id"] for i, _ in hits]
@@ -133,7 +139,8 @@ def main() -> int:
         }
 
         if client and q.get("type") != "no-answer":
-            context = build_context(r.expand(hits[: args.k_context], args.expand), r.chunks)
+            ctx_hits, n_anchor = r.expand(hits[: args.k_context], args.expand)
+            context = build_context(ctx_hits, r.chunks, n_anchor=n_anchor)
             prompt = SYSTEM_PROMPT.format(context=context, question=q["question"])
             resp = client.chat.completions.create(
                 model="deepseek-chat",
@@ -155,7 +162,8 @@ def main() -> int:
                 row["score"] = 0.0
             row["answer"] = answer
         elif client and q.get("type") == "no-answer":
-            context = build_context(r.expand(hits[: args.k_context], args.expand), r.chunks)
+            ctx_hits, n_anchor = r.expand(hits[: args.k_context], args.expand)
+            context = build_context(ctx_hits, r.chunks, n_anchor=n_anchor)
             prompt = SYSTEM_PROMPT.format(context=context, question=q["question"])
             resp = client.chat.completions.create(
                 model="deepseek-chat",
@@ -223,7 +231,8 @@ def main() -> int:
             f"| {args.append_results} | {date.today()} | {set_label} | heading/700/120 | {args.retrieval} | "
             f"{'on' if args.rerank else 'off'} | {summary['recall@5']:.3f} | {summary['mrr']:.3f} | "
             f"{(summary['acc'] if summary['acc'] is not None else float('nan')):.3f} | "
-            f"- | {summary['p95']:.2f}s | - | {len(rows)} 题，k_context={args.k_context}，k_retrieve={args.k_retrieve}，expand=±{args.expand} |\n"
+            f"- | {summary['p95']:.2f}s | - | {len(rows)} 题，k_context={args.k_context}，k_retrieve={args.k_retrieve}，expand=±{args.expand}"
+            f"{'，qe=on' if args.query_expand else ''} |\n"
         )
         with (ROOT / "results" / "RESULTS.md").open("a", encoding="utf-8") as f:
             f.write(line)

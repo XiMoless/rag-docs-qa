@@ -97,35 +97,36 @@ class Retriever:
         order = np.argsort(scores)[::-1][:top_n]
         return [(hits[o][0], float(scores[o])) for o in order]
 
-    def expand(self, hits: list[tuple[int, float]], window: int = 1) -> list[tuple[int, float]]:
+    def expand(self, hits: list[tuple[int, float]], window: int = 1) -> tuple[list[tuple[int, float]], int]:
         """邻接扩展（small-to-big）：把每个命中的同页前后 window 个 chunk 并入上下文。
 
-        邻居不参与打分（分数记 0.0），只为了让被切断的原文重新接上——
-        D 段 8 条弃答全是同一页被切成相邻 chunk、两题各拿一半（`skills#007` 进了
-        D-004 的 top-5，D-003 只召回 `skills#008`）。
+        返回 (扩展后的列表, 锚点数)。**锚点全部排在前面**，邻居跟在后面——否则一条很长的
+        邻居片段会把后面真正命中的锚点挤出 `max_chars` 预算（E006 里 4 条单跳题从 1.0 掉到
+        0.0，就是这个原因）。邻居分数记 0.0，不参与排序，只做上下文补全。
         """
         if window <= 0:
-            return hits
+            return hits, len(hits)
         pos = {(c["doc_id"], c["order"]): i for i, c in enumerate(self.chunks)}
+        anchors: list[tuple[int, float]] = []
+        neighbors: list[tuple[int, float]] = []
         seen: set[int] = set()
-        out: list[tuple[int, float]] = []
         for i, score in hits:
             if i in seen:
                 continue
             seen.add(i)
-            out.append((i, score))
+            anchors.append((i, score))
             c = self.chunks[i]
             for d in range(1, window + 1):
                 for step in (d, -d):
                     j = pos.get((c["doc_id"], c["order"] + step))
                     if j is not None and j not in seen:
                         seen.add(j)
-                        out.append((j, 0.0))
-        return out
+                        neighbors.append((j, 0.0))
+        return anchors + neighbors, len(anchors)
 
-    def rrf(self, q: str, k_retrieve: int, k_context: int, rrf_k: int = 60) -> list[tuple[int, float]]:
+    def rrf(self, q: str, k_retrieve: int, k_context: int, rrf_k: int = 60, kw_query: str | None = None) -> list[tuple[int, float]]:
         vec = self.vector(q, k_retrieve)
-        kw = self.keyword(q, k_retrieve)
+        kw = self.keyword(kw_query or q, k_retrieve)
         fused: dict[int, float] = {}
         for rank, (i, _) in enumerate(vec, 1):
             fused[i] = fused.get(i, 0.0) + 1.0 / (rrf_k + rank)
@@ -135,12 +136,14 @@ class Retriever:
         return ranked[:k_context]
 
 
-def build_context(hits: list[tuple[int, float]], chunks: list[dict], max_chars: int = 6000) -> str:
+def build_context(hits: list[tuple[int, float]], chunks: list[dict], max_chars: int = 6000, n_anchor: int | None = None) -> str:
+    """拼装上下文。`n_anchor` 之前的块视为检索命中，之后的视为同页邻接补全（会显式标注）。"""
     parts: list[str] = []
     used = 0
     for n, (i, _score) in enumerate(hits, 1):
         c = chunks[i]
-        block = f"[{n}] 来源：{c['url']}\n标题路径：{c['heading_path']}\n\n{c['text']}"
+        tag = "" if n_anchor is None or n <= n_anchor else "（同页相邻片段·非检索命中，仅作补全）"
+        block = f"[{n}]{tag} 来源：{c['url']}\n标题路径：{c['heading_path']}\n\n{c['text']}"
         if used + len(block) > max_chars:
             break
         parts.append(block)
@@ -179,18 +182,19 @@ def main() -> int:
         hits = r.rrf(args.question, args.k_retrieve, args.k_context)
     t_ret = time.time() - t1
 
+    n_anchor = len(hits)
     if args.expand > 0:
-        n_anchor = len(hits)
-        hits = r.expand(hits, args.expand)
+        hits, n_anchor = r.expand(hits, args.expand)
 
     if args.show_chunks:
-        print(f"\n== 检索（{args.retrieval}，{t_ret:.2f}s，扩展 ±{args.expand}）==")
+        print(f"\n== 检索（{args.retrieval}，{t_ret:.2f}s，锚点 {n_anchor} + 邻接 ±{args.expand}）==")
         for n, (i, s) in enumerate(hits, 1):
             c = r.chunks[i]
-            print(f"[{n}] {s:.4f}  {c['chunk_id']}  {c['heading_path'][:60]}")
+            mark = "" if n <= n_anchor else "  ~补全"
+            print(f"[{n}] {s:.4f}  {c['chunk_id']}  {c['heading_path'][:60]}{mark}")
             print(f"    {c['url']}")
 
-    context = build_context(hits, r.chunks)
+    context = build_context(hits, r.chunks, n_anchor=n_anchor)
     prompt = SYSTEM_PROMPT.format(context=context, question=args.question)
 
     client = OpenAI(
