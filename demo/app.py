@@ -92,4 +92,15 @@ with gr.Blocks(title="LangChain 文档 RAG 问答") as demo:
 
 
 if __name__ == "__main__":
-    demo.launch(server_name="127.0.0.1", server_port=7860)
+    # 双击「启动问答.bat」时：先打印地址，再自动开浏览器
+    open_browser = os.environ.get("RAGQA_NO_BROWSER") != "1"
+    if not os.environ.get("DEEPSEEK_API_KEY"):
+        print("[错误] 没有读到 DEEPSEEK_API_KEY：请检查项目根目录的 .env 文件是否填了 key", file=sys.stderr)
+        raise SystemExit(2)
+    print("=" * 56)
+    print("  RAG 文档问答（LangChain 文档 · 401 页 · 10994 chunks）")
+    print("  地址：http://127.0.0.1:7860")
+    print("  首次提问要加载 bge-m3 与 FAISS 索引，等 10~20 秒")
+    print("  这个窗口关掉 = 服务停止")
+    print("=" * 56, flush=True)
+    demo.launch(server_name="127.0.0.1", server_port=7860, inbrowser=open_browser, quiet=True)
