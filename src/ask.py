@@ -97,6 +97,32 @@ class Retriever:
         order = np.argsort(scores)[::-1][:top_n]
         return [(hits[o][0], float(scores[o])) for o in order]
 
+    def expand(self, hits: list[tuple[int, float]], window: int = 1) -> list[tuple[int, float]]:
+        """邻接扩展（small-to-big）：把每个命中的同页前后 window 个 chunk 并入上下文。
+
+        邻居不参与打分（分数记 0.0），只为了让被切断的原文重新接上——
+        D 段 8 条弃答全是同一页被切成相邻 chunk、两题各拿一半（`skills#007` 进了
+        D-004 的 top-5，D-003 只召回 `skills#008`）。
+        """
+        if window <= 0:
+            return hits
+        pos = {(c["doc_id"], c["order"]): i for i, c in enumerate(self.chunks)}
+        seen: set[int] = set()
+        out: list[tuple[int, float]] = []
+        for i, score in hits:
+            if i in seen:
+                continue
+            seen.add(i)
+            out.append((i, score))
+            c = self.chunks[i]
+            for d in range(1, window + 1):
+                for step in (d, -d):
+                    j = pos.get((c["doc_id"], c["order"] + step))
+                    if j is not None and j not in seen:
+                        seen.add(j)
+                        out.append((j, 0.0))
+        return out
+
     def rrf(self, q: str, k_retrieve: int, k_context: int, rrf_k: int = 60) -> list[tuple[int, float]]:
         vec = self.vector(q, k_retrieve)
         kw = self.keyword(q, k_retrieve)
@@ -128,6 +154,7 @@ def main() -> int:
     ap.add_argument("--retrieval", default="rrf", choices=["rrf", "vec", "bm25"])
     ap.add_argument("--k-retrieve", type=int, default=20)
     ap.add_argument("--k-context", type=int, default=5)
+    ap.add_argument("--expand", type=int, default=1, help="邻接扩展：每个命中并入同页前后各 N 个 chunk（0=关）")
     ap.add_argument("--show-chunks", action="store_true")
     ap.add_argument("--model", default="deepseek-chat")
     args = ap.parse_args()
@@ -152,8 +179,12 @@ def main() -> int:
         hits = r.rrf(args.question, args.k_retrieve, args.k_context)
     t_ret = time.time() - t1
 
+    if args.expand > 0:
+        n_anchor = len(hits)
+        hits = r.expand(hits, args.expand)
+
     if args.show_chunks:
-        print(f"\n== 检索（{args.retrieval}，{t_ret:.2f}s）==")
+        print(f"\n== 检索（{args.retrieval}，{t_ret:.2f}s，扩展 ±{args.expand}）==")
         for n, (i, s) in enumerate(hits, 1):
             c = r.chunks[i]
             print(f"[{n}] {s:.4f}  {c['chunk_id']}  {c['heading_path'][:60]}")
