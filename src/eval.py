@@ -82,6 +82,8 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="只算检索指标")
     ap.add_argument("--rerank", action="store_true", help="候选再走 cross-encoder 重排（bge-reranker-v2-m3）")
     ap.add_argument("--expand", type=int, default=0, help="邻接扩展：每个命中并入同页前后各 N 个 chunk（0=关）")
+    ap.add_argument("--rrf-weights", default="1,1", help="RRF 通道权重：向量,词法（如 1,0.5 表示压低词法通道）")
+    ap.add_argument("--prompt", default="v1", choices=["v1", "v2"], help="生成提示词版本（v2 加多跳拼接与数字逐字约束）")
     ap.add_argument("--query-expand", action="store_true", help="把中文问题改写成英文关键词后再走 BM25 通道（修复中英错配）")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--append-results", default="", help="把结果追加到 RESULTS.md，填实验 id")
@@ -93,13 +95,14 @@ def main() -> int:
         print("缺少 DEEPSEEK_API_KEY，无法判分；可先 --dry-run", file=sys.stderr)
         return 2
 
-    from src.ask import Retriever, build_context, SYSTEM_PROMPT
+    from src.ask import Retriever, build_context, SYSTEM_PROMPT, SYSTEM_PROMPT_V2
 
     qs = [json.loads(line) for line in Path(args.set).open(encoding="utf-8")]
     if args.limit:
         qs = qs[: args.limit]
     print(f"eval set: {len(qs)} questions from {args.set}")
 
+    prompt_tpl = SYSTEM_PROMPT_V2 if args.prompt == "v2" else SYSTEM_PROMPT
     r = Retriever()
     client = None
     if args.judge or args.query_expand:
@@ -109,6 +112,8 @@ def main() -> int:
 
     rows: list[dict] = []
     latencies: list[float] = []
+    tok_in = 0
+    tok_out = 0
     t_all = time.time()
 
     for n, q in enumerate(qs, 1):
@@ -123,7 +128,8 @@ def main() -> int:
         elif args.retrieval == "bm25":
             hits = r.keyword(kw_query or q["question"], args.k_retrieve)
         else:
-            hits = r.rrf(q["question"], args.k_retrieve, args.k_retrieve, kw_query=kw_query)  # 融合后保留 k_retrieve 个候选，供 R@10/rerank 使用
+            w_vec, w_kw = (float(x) for x in args.rrf_weights.split(","))
+            hits = r.rrf(q["question"], args.k_retrieve, args.k_retrieve, kw_query=kw_query, w_vec=w_vec, w_kw=w_kw)  # 融合后保留 k_retrieve 个候选，供 R@10/rerank 使用
         if args.rerank:
             hits = r.rerank(q["question"], hits, args.k_retrieve)
         ranked_ids = [r.chunks[i]["chunk_id"] for i, _ in hits]
@@ -141,7 +147,7 @@ def main() -> int:
         if client and q.get("type") != "no-answer":
             ctx_hits, n_anchor = r.expand(hits[: args.k_context], args.expand)
             context = build_context(ctx_hits, r.chunks, n_anchor=n_anchor)
-            prompt = SYSTEM_PROMPT.format(context=context, question=q["question"])
+            prompt = prompt_tpl.format(context=context, question=q["question"])
             resp = client.chat.completions.create(
                 model="deepseek-chat",
                 messages=[{"role": "user", "content": prompt}],
@@ -149,12 +155,16 @@ def main() -> int:
                 max_tokens=1200,
             )
             answer = resp.choices[0].message.content or ""
+            tok_in += resp.usage.prompt_tokens
+            tok_out += resp.usage.completion_tokens
             j = client.chat.completions.create(
                 model="deepseek-chat",
                 messages=[{"role": "user", "content": JUDGE_PROMPT.format(question=q["question"], gold=q.get("gold_answer", ""), answer=answer)}],
                 temperature=0.0,
                 max_tokens=8,
             )
+            tok_in += j.usage.prompt_tokens
+            tok_out += j.usage.completion_tokens
             raw = (j.choices[0].message.content or "").strip()
             try:
                 row["score"] = float(raw.replace("分", "")[:3])
@@ -164,7 +174,7 @@ def main() -> int:
         elif client and q.get("type") == "no-answer":
             ctx_hits, n_anchor = r.expand(hits[: args.k_context], args.expand)
             context = build_context(ctx_hits, r.chunks, n_anchor=n_anchor)
-            prompt = SYSTEM_PROMPT.format(context=context, question=q["question"])
+            prompt = prompt_tpl.format(context=context, question=q["question"])
             resp = client.chat.completions.create(
                 model="deepseek-chat",
                 messages=[{"role": "user", "content": prompt}],
@@ -172,6 +182,8 @@ def main() -> int:
                 max_tokens=800,
             )
             answer = resp.choices[0].message.content or ""
+            tok_in += resp.usage.prompt_tokens
+            tok_out += resp.usage.completion_tokens
             refused = any(k in answer for k in ["没有找到", "找不到", "无法回答", "文档里没有", "不足以回答"])
             row["abstained"] = 1.0 if refused else 0.0
             row["answer"] = answer
@@ -200,6 +212,8 @@ def main() -> int:
         "abstain_rate": agg("abstained", na) if client and na else None,
         "p50": statistics.median(latencies) if latencies else 0.0,
         "p95": p95(latencies),
+        "tokens_in": tok_in,
+        "tokens_out": tok_out,
     }
 
     print("\n== summary ==")
@@ -218,6 +232,12 @@ def main() -> int:
                 f.write(json.dumps(x, ensure_ascii=False) + "\n")
         print(f"detail -> {args.out}")
 
+    if args.query_expand:
+        from src.query_expand import save_cache
+
+        save_cache()  # 落盘翻译缓存：同一批题重跑时复用同一批关键词，指标才可复现
+        print(f"qe cache -> tmp/qe_cache.json")
+
     if args.append_results:
         from datetime import date
 
@@ -231,8 +251,8 @@ def main() -> int:
             f"| {args.append_results} | {date.today()} | {set_label} | heading/700/120 | {args.retrieval} | "
             f"{'on' if args.rerank else 'off'} | {summary['recall@5']:.3f} | {summary['mrr']:.3f} | "
             f"{(summary['acc'] if summary['acc'] is not None else float('nan')):.3f} | "
-            f"- | {summary['p95']:.2f}s | - | {len(rows)} 题，k_context={args.k_context}，k_retrieve={args.k_retrieve}，expand=±{args.expand}"
-            f"{'，qe=on' if args.query_expand else ''} |\n"
+            f"- | {summary['p95']:.2f}s | in {summary['tokens_in'] / 1000:.0f}K / out {summary['tokens_out'] / 1000:.0f}K | {len(rows)} 题，k_context={args.k_context}，k_retrieve={args.k_retrieve}，expand=±{args.expand}"
+            f"{'，qe=on' if args.query_expand else ''}{'，w=' + args.rrf_weights if args.rrf_weights != '1,1' else ''}{'，prompt=' + args.prompt if args.prompt != 'v1' else ''} |\n"
         )
         with (ROOT / "results" / "RESULTS.md").open("a", encoding="utf-8") as f:
             f.write(line)

@@ -44,6 +44,26 @@ SYSTEM_PROMPT = """你是 LangChain 官方文档的问答助手。规则：
 """
 
 
+# v2：针对「多跳题好检不好答」加的生成端约束（E005 分析：v2 多跳 R@5 涨 24pp 而正确率只涨 1.3pp）
+SYSTEM_PROMPT_V2 = """你是 LangChain 官方文档的问答助手。规则：
+
+1. 只根据下面给出的【文档片段】回答，不要用你记忆里的知识补充。
+2. 每个结论后面用 [编号] 标注来源，例如 [2]。编号必须来自片段列表。
+3. 如果片段不足以回答，直接说「给出的文档里没有找到能回答这个问题的内容」，并说明缺什么，不要猜。
+4. 如果片段里 API 名称、参数看起来与用户说法不一致，以片段为准，并指出差异。
+5. 回答用中文，代码块保留原语言。先给结论，再给最小可用示例。
+6. 如果答案需要**拼接多个片段**才能成立：先逐条写出每个相关片段各自说明了什么（每条带 [编号]），再写出合并后的结论。不要只引一个片段就给结论。
+7. 数字、默认值、枚举值、函数名必须与片段原文逐字一致，不得改写、估算或四舍五入；片段没写默认值就说「片段未给出默认值」。
+8. 标注为「同页相邻片段·非检索命中」的片段只用于补全上下文，引用它时要说明它是补全片段而非检索命中。
+
+【文档片段】
+{context}
+
+【问题】
+{question}
+"""
+
+
 def load_dotenv() -> None:
     env = ROOT / ".env"
     if not env.exists():
@@ -124,14 +144,15 @@ class Retriever:
                         neighbors.append((j, 0.0))
         return anchors + neighbors, len(anchors)
 
-    def rrf(self, q: str, k_retrieve: int, k_context: int, rrf_k: int = 60, kw_query: str | None = None) -> list[tuple[int, float]]:
+    def rrf(self, q: str, k_retrieve: int, k_context: int, rrf_k: int = 60, kw_query: str | None = None,
+            w_vec: float = 1.0, w_kw: float = 1.0) -> list[tuple[int, float]]:
         vec = self.vector(q, k_retrieve)
         kw = self.keyword(kw_query or q, k_retrieve)
         fused: dict[int, float] = {}
         for rank, (i, _) in enumerate(vec, 1):
-            fused[i] = fused.get(i, 0.0) + 1.0 / (rrf_k + rank)
+            fused[i] = fused.get(i, 0.0) + w_vec / (rrf_k + rank)
         for rank, (i, _) in enumerate(kw, 1):
-            fused[i] = fused.get(i, 0.0) + 1.0 / (rrf_k + rank)
+            fused[i] = fused.get(i, 0.0) + w_kw / (rrf_k + rank)
         ranked = sorted(fused.items(), key=lambda x: -x[1])
         return ranked[:k_context]
 
