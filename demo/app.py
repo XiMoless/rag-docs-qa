@@ -92,4 +92,4 @@ with gr.Blocks(title="LangChain 文档 RAG 问答") as demo:
 
 
 if __name__ == "__main__":
-    demo.launch(server_name="127.0.0.1", server_port=7860, show_api=False)
+    demo.launch(server_name="127.0.0.1", server_port=7860)
