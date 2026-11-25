@@ -164,6 +164,43 @@ def rrf(q: str, k: int, kw_query: str | None = None, rrf_k: int = 60) -> list[tu
     return sorted(fused.items(), key=lambda x: -x[1])[:k]
 
 
+# 极简中→英术语表：没有 DeepSeek key 时也能做最基本的 BM25 匹配（只覆盖高频词，
+# 质量远低于 LLM 翻译，页面已注明；作用是让演示站在没配 key 时不至于 0 命中）。
+CN_TERMS = {
+    "检查点": "checkpoint", "持久化": "persistence", "线程": "thread", "会话": "session",
+    "状态": "state", "记忆": "memory", "中间件": "middleware", "工具调用": "tool call",
+    "工具": "tool", "节点": "node", "图": "graph", "边": "edge", "条件": "conditional",
+    "循环": "loop", "递归": "recursion", "限制": "limit", "流式": "stream",
+    "中断": "interrupt", "恢复": "resume", "续跑": "resume", "重试": "retry",
+    "超时": "timeout", "配置": "configuration", "参数": "parameter", "默认值": "default",
+    "提示词": "prompt", "模型": "model", "嵌入": "embedding", "向量": "vector",
+    "检索": "retrieval", "检索增强": "rag", "文档": "document", "切分": "split",
+    "分块": "chunk", "重排": "rerank", "召回": "recall", "评测": "evaluation",
+    "基准": "benchmark", "部署": "deploy", "生产": "production", "沙箱": "sandbox",
+    "权限": "permission", "审批": "approval", "人工": "human in the loop",
+    "子代理": "subagent", "智能体": "agent", "代理": "agent", "工作流": "workflow",
+    "并行": "parallel", "并发": "concurrency", "缓存": "cache", "数据库": "database",
+    "文件": "file", "上传": "upload", "下载": "download", "网络": "network",
+    "读取": "read", "写入": "write", "删除": "delete", "搜索": "search",
+    "结构化": "structured", "输出": "output", "类型": "type", "校验": "validation",
+    "错误": "error", "异常": "exception", "日志": "log", "监控": "monitoring",
+    "追踪": "trace", "测试": "test", "单元测试": "unit test", "重构": "refactor",
+}
+
+
+def fallback_keywords(q: str) -> str:
+    """没有 LLM 翻译时的兜底：保留英文标识符 + 查术语表 + 保留英文原词。"""
+    ascii_tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_.\-]{1,}", q or "")
+    cn = []
+    for zh, en in CN_TERMS.items():
+        if zh in (q or ""):
+            cn.append(en)
+    out = []
+    for tok in ascii_tokens + cn:
+        if tok.lower() not in [x.lower() for x in out]:
+            out.append(tok)
+    return " ".join(out[:12])
+
 def translate(q: str, client) -> str:
     if client is None:
         return ""
@@ -222,6 +259,8 @@ def answer(question: str, mode: str, k: int, use_translate: bool):
     t0 = time.time()
     client = api_client()
     kw = translate(question, client) if (use_translate and client) else ""
+    if not kw:
+        kw = fallback_keywords(question)
     # bge-small-en 是纯英文模型：中文原句与英文关键词各有胜负，所以两路向量都跑、交给 RRF 融合
     pool = 20
     if mode == "纯向量":
