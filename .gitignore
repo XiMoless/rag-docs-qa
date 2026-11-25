@@ -16,3 +16,5 @@ outputs/
 tmp/
 *.log
 .DS_Store
+
+docs/figs/demo_frames/

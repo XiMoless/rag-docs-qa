@@ -1,8 +1,17 @@
-# LangChain 文档问答（垂直 RAG）
+﻿# LangChain 文档问答（垂直 RAG）
 
 把 LangChain 官方 OSS 文档（401 页 / 450 万字符）建成可检索的知识库，用 RAG 回答「某个 API 到底怎么用、v0.x 到 v1 改了什么」这类问题，并给出可点开的原文出处。
 
 > 为什么需要它：LangChain 正处在 v1 改名期，模型凭记忆回答会给出**已废弃的 API**——这类幻觉在文档问答里最贵。同时 401 页塞不进任何上下文，必须检索。
+
+## 在线演示
+
+![demo](docs/figs/demo.gif)
+
+- 演示站点：**https://huggingface.co/spaces/XiMoless/rag-docs-qa**（免费 CPU，冷启动约 1 分钟）
+- 代码在 `deploy/hf-space/`，一条命令发布：`python -m deploy.push_space`（需要本机 `HF_TOKEN`，会把 `.env` 里的 key 写成 Space secret，不打印）
+- **演示 ≠ 实验配置**：演示用 `bge-small-en-v1.5` + `cross-encoder/ms-marco-MiniLM-L-6-v2` 才能在免费 CPU 上秒开，且必须先把中文问题译成英文（矢量模型是纯英文的）；本仓库所有指标用的是 `bge-m3` + `bge-reranker-v2-m3`。两者不可混用，指标只认 `RESULTS.md` 的 E015/E016。
+- 演示链路：中文问题 → DeepSeek 译成英文关键词 → 向量 + BM25 各取 20 条 → RRF 融合 → cross-encoder 重排 → 取 5 段 → 只依据片段生成，片段不足就明说没找到
 
 ## 当前进度
 
@@ -27,7 +36,7 @@
 | 「主题在、事实不在」拒答题（v3） | ✅ 12 道，全部经全库词面检索 0 命中验证；eval_set_v3.jsonl = 252 题（无答案 32 道） |
 | v3 探针实测（E016） | ✅ **12/12 正确拒答**，整体无答案 32/32；252 题 acc 0.764、P95 5.83s |
 | 成本计量 | ✅ `docs/成本.md`：240 题评测实测 561K in / 100K out，查询翻译另计 33K / 3K |
-| 网页 Demo | ✅ `demo/app.py`（Gradio） |
+| 网页 Demo | ✅ 本地 `demo/app.py`（Gradio）；在线演示 `deploy/hf-space/`（Hugging Face Space） |
 
 真实数字只认 `results/RESULTS.md` 的表格行，README 不单独宣称任何指标。
 

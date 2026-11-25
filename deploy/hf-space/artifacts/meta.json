@@ -1,0 +1,9 @@
+{
+  "count": 10994,
+  "dim": 384,
+  "model": "BAAI/bge-small-en-v1.5",
+  "dtype": "float16 (L2-normalized)",
+  "built_at": "2026-11-25T15:18:44+0800",
+  "chunking": "heading/size700/overlap120",
+  "note": "演示站点专用小模型；正式实验指标（RESULTS.md E015/E016）用的是 BAAI/bge-m3 1024 维，二者不可混用。"
+}
