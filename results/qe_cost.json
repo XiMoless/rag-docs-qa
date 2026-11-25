@@ -1,0 +1,7 @@
+{
+  "questions": 240,
+  "tokens_in": 32884,
+  "tokens_out": 2909,
+  "in_per_question": 137.0,
+  "out_per_question": 12.1
+}

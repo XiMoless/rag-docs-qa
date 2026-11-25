@@ -26,11 +26,14 @@ PARTS = ROOT / "eval" / "parts"
 TARGETS = {
     "v1": {"single-hop": 52, "multi-hop": 24, "paraphrase": 16, "no-answer": 8},
     "v2": {"single-hop": 72, "multi-hop": 34, "paraphrase": 22, "no-answer": 12},
+    # v3 = v1 + v2 + 12 道「主题在语料里、但追问的具体事实不存在」的拒答题（no-answer 20+12=32）
+    "v3": {"single-hop": 124, "multi-hop": 58, "paraphrase": 38, "no-answer": 32},
 }
-# all = v1 + v2（240 题）。跑一次出两套数字：明细里按 qid 前缀 v1-/v2- 可拆开算。
+# all = v1 + v2（240 题，保持与 E005/E015 可比）。v3（252 题）另存 eval_set_v3.jsonl。
 TARGETS["all"] = {
     k: TARGETS["v1"][k] + TARGETS["v2"][k] for k in TARGETS["v1"]
 }
+ALL_PARTS = ("v1", "v2")  # "all" 只收这两版，别把 v3 的 12 道混进 240 题基线
 
 
 def main() -> int:
@@ -46,7 +49,9 @@ def main() -> int:
 
     files = sorted(PARTS.glob(f"{args.version}_part*.jsonl"))
     if args.version == "all":
-        files = sorted(PARTS.glob("v*_part*.jsonl"))
+        files = [f for v in ALL_PARTS for f in sorted(PARTS.glob(f"{v}_part*.jsonl"))]
+    elif args.version == "v3":
+        files = [f for v in ("v1", "v2", "v3") for f in sorted(PARTS.glob(f"{v}_part*.jsonl"))]
     if not files:
         print(f"{PARTS} 里没有 {args.version}_part*.jsonl")
         return 1

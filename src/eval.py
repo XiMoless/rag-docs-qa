@@ -85,6 +85,7 @@ def main() -> int:
     ap.add_argument("--rrf-weights", default="1,1", help="RRF 通道权重：向量,词法（如 1,0.5 表示压低词法通道）")
     ap.add_argument("--prompt", default="v1", choices=["v1", "v2"], help="生成提示词版本（v2 加多跳拼接与数字逐字约束）")
     ap.add_argument("--query-expand", action="store_true", help="把中文问题改写成英文关键词后再走 BM25 通道（修复中英错配）")
+    ap.add_argument("--repeat", type=int, default=1, help="同一配置重复跑 N 次取均值（生成/judge 有随机性，2.7pp 级差异必须重复跑）")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--append-results", default="", help="把结果追加到 RESULTS.md，填实验 id")
     ap.add_argument("--out", default="", help="逐题明细落盘路径")
@@ -110,127 +111,164 @@ def main() -> int:
 
         client = OpenAI(api_key=os.environ["DEEPSEEK_API_KEY"], base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
 
-    rows: list[dict] = []
-    latencies: list[float] = []
-    tok_in = 0
-    tok_out = 0
-    t_all = time.time()
+    def run_once(rep: int) -> tuple[list[dict], list[float], int, int]:
+        rows: list[dict] = []
+        latencies: list[float] = []
+        tok_in = 0
+        tok_out = 0
+        t_all = time.time()
 
-    for n, q in enumerate(qs, 1):
-        t0 = time.time()
-        kw_query = None
-        if args.query_expand:
-            from src.query_expand import expand as qe_expand
+        for n, q in enumerate(qs, 1):
+            t0 = time.time()
+            kw_query = None
+            if args.query_expand:
+                from src.query_expand import expand as qe_expand
 
-            kw_query = qe_expand(q["question"], client)
-        if args.retrieval == "vec":
-            hits = r.vector(q["question"], args.k_retrieve)
-        elif args.retrieval == "bm25":
-            hits = r.keyword(kw_query or q["question"], args.k_retrieve)
-        else:
-            w_vec, w_kw = (float(x) for x in args.rrf_weights.split(","))
-            hits = r.rrf(q["question"], args.k_retrieve, args.k_retrieve, kw_query=kw_query, w_vec=w_vec, w_kw=w_kw)  # 融合后保留 k_retrieve 个候选，供 R@10/rerank 使用
-        if args.rerank:
-            hits = r.rerank(q["question"], hits, args.k_retrieve)
-        ranked_ids = [r.chunks[i]["chunk_id"] for i, _ in hits]
-        gold = q.get("source_ids") or []
-        row = {
-            "qid": q["qid"],
-            "type": q.get("type", ""),
-            "recall@1": recall_at(ranked_ids, gold, 1),
-            "recall@5": recall_at(ranked_ids, gold, 5),
-            "recall@10": recall_at(ranked_ids, gold, 10),
-            "mrr": mrr(ranked_ids, gold),
-            "top5": ranked_ids[:5],
-        }
+                kw_query = qe_expand(q["question"], client)
+            if args.retrieval == "vec":
+                hits = r.vector(q["question"], args.k_retrieve)
+            elif args.retrieval == "bm25":
+                hits = r.keyword(kw_query or q["question"], args.k_retrieve)
+            else:
+                w_vec, w_kw = (float(x) for x in args.rrf_weights.split(","))
+                hits = r.rrf(q["question"], args.k_retrieve, args.k_retrieve, kw_query=kw_query, w_vec=w_vec, w_kw=w_kw)  # 融合后保留 k_retrieve 个候选，供 R@10/rerank 使用
+            if args.rerank:
+                hits = r.rerank(q["question"], hits, args.k_retrieve)
+            ranked_ids = [r.chunks[i]["chunk_id"] for i, _ in hits]
+            gold = q.get("source_ids") or []
+            row = {
+                "qid": q["qid"],
+                "type": q.get("type", ""),
+                "recall@1": recall_at(ranked_ids, gold, 1),
+                "recall@5": recall_at(ranked_ids, gold, 5),
+                "recall@10": recall_at(ranked_ids, gold, 10),
+                "mrr": mrr(ranked_ids, gold),
+                "top5": ranked_ids[:5],
+            }
 
-        if client and q.get("type") != "no-answer":
-            ctx_hits, n_anchor = r.expand(hits[: args.k_context], args.expand)
-            context = build_context(ctx_hits, r.chunks, n_anchor=n_anchor)
-            prompt = prompt_tpl.format(context=context, question=q["question"])
-            resp = client.chat.completions.create(
-                model="deepseek-chat",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                max_tokens=1200,
-            )
-            answer = resp.choices[0].message.content or ""
-            tok_in += resp.usage.prompt_tokens
-            tok_out += resp.usage.completion_tokens
-            j = client.chat.completions.create(
-                model="deepseek-chat",
-                messages=[{"role": "user", "content": JUDGE_PROMPT.format(question=q["question"], gold=q.get("gold_answer", ""), answer=answer)}],
-                temperature=0.0,
-                max_tokens=8,
-            )
-            tok_in += j.usage.prompt_tokens
-            tok_out += j.usage.completion_tokens
-            raw = (j.choices[0].message.content or "").strip()
-            try:
-                row["score"] = float(raw.replace("分", "")[:3])
-            except ValueError:
-                row["score"] = 0.0
-            row["answer"] = answer
-        elif client and q.get("type") == "no-answer":
-            ctx_hits, n_anchor = r.expand(hits[: args.k_context], args.expand)
-            context = build_context(ctx_hits, r.chunks, n_anchor=n_anchor)
-            prompt = prompt_tpl.format(context=context, question=q["question"])
-            resp = client.chat.completions.create(
-                model="deepseek-chat",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                max_tokens=800,
-            )
-            answer = resp.choices[0].message.content or ""
-            tok_in += resp.usage.prompt_tokens
-            tok_out += resp.usage.completion_tokens
-            refused = any(k in answer for k in ["没有找到", "找不到", "无法回答", "文档里没有", "不足以回答"])
-            row["abstained"] = 1.0 if refused else 0.0
-            row["answer"] = answer
+            if client and q.get("type") != "no-answer":
+                ctx_hits, n_anchor = r.expand(hits[: args.k_context], args.expand)
+                context = build_context(ctx_hits, r.chunks, n_anchor=n_anchor)
+                prompt = prompt_tpl.format(context=context, question=q["question"])
+                resp = client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                    max_tokens=1200,
+                )
+                answer = resp.choices[0].message.content or ""
+                tok_in += resp.usage.prompt_tokens
+                tok_out += resp.usage.completion_tokens
+                j = client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[{"role": "user", "content": JUDGE_PROMPT.format(question=q["question"], gold=q.get("gold_answer", ""), answer=answer)}],
+                    temperature=0.0,
+                    max_tokens=8,
+                )
+                tok_in += j.usage.prompt_tokens
+                tok_out += j.usage.completion_tokens
+                raw = (j.choices[0].message.content or "").strip()
+                try:
+                    row["score"] = float(raw.replace("分", "")[:3])
+                except ValueError:
+                    row["score"] = 0.0
+                row["answer"] = answer
+            elif client and q.get("type") == "no-answer":
+                ctx_hits, n_anchor = r.expand(hits[: args.k_context], args.expand)
+                context = build_context(ctx_hits, r.chunks, n_anchor=n_anchor)
+                prompt = prompt_tpl.format(context=context, question=q["question"])
+                resp = client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                    max_tokens=800,
+                )
+                answer = resp.choices[0].message.content or ""
+                tok_in += resp.usage.prompt_tokens
+                tok_out += resp.usage.completion_tokens
+                refused = any(k in answer for k in ["没有找到", "找不到", "无法回答", "文档里没有", "不足以回答"])
+                row["abstained"] = 1.0 if refused else 0.0
+                row["answer"] = answer
 
-        dt = time.time() - t0
-        row["latency"] = dt
-        latencies.append(dt)
-        rows.append(row)
-        if n % 20 == 0:
-            print(f"  [{n}/{len(qs)}] {time.time() - t_all:.0f}s")
+            dt = time.time() - t0
+            row["latency"] = dt
+            latencies.append(dt)
+            rows.append(row)
+            if n % 20 == 0:
+                print(f"  [{n}/{len(qs)}] {time.time() - t_all:.0f}s")
+        return rows, latencies, tok_in, tok_out
 
     def agg(key: str, subset: list[dict]) -> float:
         vals = [x[key] for x in subset if key in x]
         return statistics.mean(vals) if vals else 0.0
 
-    scored = [x for x in rows if x.get("type") != "no-answer"]
-    na = [x for x in rows if x.get("type") == "no-answer"]
-    summary = {
-        "n": len(rows),
-        "retrieval": args.retrieval,
-        "recall@1": agg("recall@1", scored),
-        "recall@5": agg("recall@5", scored),
-        "recall@10": agg("recall@10", scored),
-        "mrr": agg("mrr", scored),
-        "acc": agg("score", rows) if client else None,
-        "abstain_rate": agg("abstained", na) if client and na else None,
-        "p50": statistics.median(latencies) if latencies else 0.0,
-        "p95": p95(latencies),
-        "tokens_in": tok_in,
-        "tokens_out": tok_out,
-    }
+    def summarize(rows_r: list[dict], lat_r: list[float], tin: int, tout: int) -> dict:
+        scored_r = [x for x in rows_r if x.get("type") != "no-answer"]
+        na_r = [x for x in rows_r if x.get("type") == "no-answer"]
+        return {
+            "n": len(rows_r),
+            "recall@1": agg("recall@1", scored_r),
+            "recall@5": agg("recall@5", scored_r),
+            "recall@10": agg("recall@10", scored_r),
+            "mrr": agg("mrr", scored_r),
+            "acc": agg("score", rows_r) if client else None,
+            "abstain_rate": agg("abstained", na_r) if client and na_r else None,
+            "p50": statistics.median(lat_r) if lat_r else 0.0,
+            "p95": p95(lat_r),
+            "tokens_in": tin,
+            "tokens_out": tout,
+        }
+
+    reps = max(1, args.repeat)
+    per_rep: list[dict] = []
+    rows: list[dict] = []
+    for rep in range(reps):
+        if reps > 1:
+            print(f"\n-- repeat {rep + 1}/{reps} --")
+        rows_r, lat_r, tin, tout = run_once(rep)
+        per_rep.append(summarize(rows_r, lat_r, tin, tout))
+        if args.out and reps > 1:
+            pr = Path(args.out)
+            pr = pr.with_name(f"{pr.stem}_rep{rep + 1}{pr.suffix}")
+            pr.parent.mkdir(parents=True, exist_ok=True)
+            with pr.open("w", encoding="utf-8") as f:
+                for x in rows_r:
+                    f.write(json.dumps(x, ensure_ascii=False) + "\n")
+            print(f"detail -> {pr}")
+        rows = rows_r
+
+    keys = [k for k in per_rep[0] if k not in ("n", "tokens_in", "tokens_out")]
+    summary: dict = {"n": len(rows), "retrieval": args.retrieval, "reps": reps}
+    for k in keys:
+        vals = [x[k] for x in per_rep if x[k] is not None]
+        summary[k] = statistics.mean(vals) if vals else None
+    summary["tokens_in"] = sum(x["tokens_in"] for x in per_rep)
+    summary["tokens_out"] = sum(x["tokens_out"] for x in per_rep)
+    for k in ("acc", "recall@5", "mrr"):
+        vals = [x[k] for x in per_rep if x[k] is not None]
+        summary["std_" + k] = statistics.stdev(vals) if len(vals) > 1 else 0.0
 
     print("\n== summary ==")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     by_type: dict[str, list[dict]] = {}
     for x in rows:
         by_type.setdefault(x["type"], []).append(x)
-    print("\nby type:")
+    print("\nby type (最后一轮):")
     for t, xs in sorted(by_type.items()):
-        print(f"  {t:12s} n={len(xs):3d} r@5={agg('recall@5', xs):.3f} mrr={agg('mrr', xs):.3f}")
+        print(f"  {t:12s} n={len(xs):3d} r@5={agg('recall@5', xs):.3f} mrr={agg('mrr', xs):.3f} acc={agg('score', xs):.3f}")
 
-    if args.out:
+    if args.out and reps == 1:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         with Path(args.out).open("w", encoding="utf-8") as f:
             for x in rows:
                 f.write(json.dumps(x, ensure_ascii=False) + "\n")
         print(f"detail -> {args.out}")
+
+    if reps > 1:
+        Path(ROOT / "results").mkdir(exist_ok=True)
+        out_rep = ROOT / "results" / ("reps_" + (args.append_results or "run") + ".json")
+        out_rep.write_text(json.dumps({"reps": per_rep, "summary": summary}, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"reps -> {out_rep}")
 
     if args.query_expand:
         from src.query_expand import save_cache
@@ -250,9 +288,9 @@ def main() -> int:
         line = (
             f"| {args.append_results} | {date.today()} | {set_label} | heading/700/120 | {args.retrieval} | "
             f"{'on' if args.rerank else 'off'} | {summary['recall@5']:.3f} | {summary['mrr']:.3f} | "
-            f"{(summary['acc'] if summary['acc'] is not None else float('nan')):.3f} | "
+            f"{(summary['acc'] if summary['acc'] is not None else float('nan')):.3f}" f"{'±' + format(summary['std_acc'], '.3f') if summary.get('reps', 1) > 1 else ''} | "
             f"- | {summary['p95']:.2f}s | in {summary['tokens_in'] / 1000:.0f}K / out {summary['tokens_out'] / 1000:.0f}K | {len(rows)} 题，k_context={args.k_context}，k_retrieve={args.k_retrieve}，expand=±{args.expand}"
-            f"{'，qe=on' if args.query_expand else ''}{'，w=' + args.rrf_weights if args.rrf_weights != '1,1' else ''}{'，prompt=' + args.prompt if args.prompt != 'v1' else ''} |\n"
+            f"{'，repeat=' + str(args.repeat) if args.repeat > 1 else ''}{'，qe=on' if args.query_expand else ''}{'，w=' + args.rrf_weights if args.rrf_weights != '1,1' else ''}{'，prompt=' + args.prompt if args.prompt != 'v1' else ''} |\n"
         )
         with (ROOT / "results" / "RESULTS.md").open("a", encoding="utf-8") as f:
             f.write(line)
