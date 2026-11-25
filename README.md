@@ -13,6 +13,8 @@
 - **演示 ≠ 实验配置**：演示用 `bge-small-en-v1.5` + `cross-encoder/ms-marco-MiniLM-L-6-v2` 才能在免费 CPU 上秒开，且必须先把中文问题译成英文（矢量模型是纯英文的）；本仓库所有指标用的是 `bge-m3` + `bge-reranker-v2-m3`。两者不可混用，指标只认 `RESULTS.md` 的 E015/E016。
 - 演示链路：中文问题 → DeepSeek 译成英文关键词 → 向量 + BM25 各取 20 条 → RRF 融合 → cross-encoder 重排 → 取 5 段 → 只依据片段生成，片段不足就明说没找到
 
+- **国内访问版**：deploy/ms-studio/（ModelScope 创空间）。免费 CPU 上跑不动 cross-encoder，所以这一版不做重排，改为「中文原句 + 英文关键词」两路向量再融合（实测对 durability 这类标识符问题更稳）。发布：python -m deploy.push_ms_studio。
+
 ## 当前进度
 
 | 环节 | 状态 |

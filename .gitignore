@@ -18,3 +18,5 @@ tmp/
 .DS_Store
 
 docs/figs/demo_frames/
+
+deploy/ms-studio/artifacts/
