@@ -145,8 +145,9 @@ class Retriever:
         return anchors + neighbors, len(anchors)
 
     def rrf(self, q: str, k_retrieve: int, k_context: int, rrf_k: int = 60, kw_query: str | None = None,
-            w_vec: float = 1.0, w_kw: float = 1.0) -> list[tuple[int, float]]:
-        vec = self.vector(q, k_retrieve)
+            w_vec: float = 1.0, w_kw: float = 1.0, vec_query: str | None = None) -> list[tuple[int, float]]:
+        # vec_query：dense 通道也用改写后的英文关键词（E018 验证中文 query 打英文语料的跨语言损耗）
+        vec = self.vector(vec_query or q, k_retrieve)
         kw = self.keyword(kw_query or q, k_retrieve)
         fused: dict[int, float] = {}
         for rank, (i, _) in enumerate(vec, 1):

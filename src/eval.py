@@ -85,6 +85,8 @@ def main() -> int:
     ap.add_argument("--rrf-weights", default="1,1", help="RRF 通道权重：向量,词法（如 1,0.5 表示压低词法通道）")
     ap.add_argument("--prompt", default="v1", choices=["v1", "v2"], help="生成提示词版本（v2 加多跳拼接与数字逐字约束）")
     ap.add_argument("--query-expand", action="store_true", help="把中文问题改写成英文关键词后再走 BM25 通道（修复中英错配）")
+    ap.add_argument("--max-chars", type=int, default=6000, help="送入上下文的片段总字符预算（E017 扫描：k 加大但 max_chars 不变时其实没生效）")
+    ap.add_argument("--qe-dense", action="store_true", help="dense 通道也用改写后的英文关键词（默认只用原中文问题）")
     ap.add_argument("--repeat", type=int, default=1, help="同一配置重复跑 N 次取均值（生成/judge 有随机性，2.7pp 级差异必须重复跑）")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--append-results", default="", help="把结果追加到 RESULTS.md，填实验 id")
@@ -131,7 +133,7 @@ def main() -> int:
                 hits = r.keyword(kw_query or q["question"], args.k_retrieve)
             else:
                 w_vec, w_kw = (float(x) for x in args.rrf_weights.split(","))
-                hits = r.rrf(q["question"], args.k_retrieve, args.k_retrieve, kw_query=kw_query, w_vec=w_vec, w_kw=w_kw)  # 融合后保留 k_retrieve 个候选，供 R@10/rerank 使用
+                hits = r.rrf(q["question"], args.k_retrieve, args.k_retrieve, kw_query=kw_query, w_vec=w_vec, w_kw=w_kw, vec_query=(kw_query if args.qe_dense else None))  # 融合后保留 k_retrieve 个候选，供 R@10/rerank 使用
             if args.rerank:
                 hits = r.rerank(q["question"], hits, args.k_retrieve)
             ranked_ids = [r.chunks[i]["chunk_id"] for i, _ in hits]
@@ -148,7 +150,7 @@ def main() -> int:
 
             if client and q.get("type") != "no-answer":
                 ctx_hits, n_anchor = r.expand(hits[: args.k_context], args.expand)
-                context = build_context(ctx_hits, r.chunks, n_anchor=n_anchor)
+                context = build_context(ctx_hits, r.chunks, max_chars=args.max_chars, n_anchor=n_anchor)
                 prompt = prompt_tpl.format(context=context, question=q["question"])
                 resp = client.chat.completions.create(
                     model="deepseek-chat",
@@ -175,7 +177,7 @@ def main() -> int:
                 row["answer"] = answer
             elif client and q.get("type") == "no-answer":
                 ctx_hits, n_anchor = r.expand(hits[: args.k_context], args.expand)
-                context = build_context(ctx_hits, r.chunks, n_anchor=n_anchor)
+                context = build_context(ctx_hits, r.chunks, max_chars=args.max_chars, n_anchor=n_anchor)
                 prompt = prompt_tpl.format(context=context, question=q["question"])
                 resp = client.chat.completions.create(
                     model="deepseek-chat",
@@ -290,7 +292,7 @@ def main() -> int:
             f"{'on' if args.rerank else 'off'} | {summary['recall@5']:.3f} | {summary['mrr']:.3f} | "
             f"{(summary['acc'] if summary['acc'] is not None else float('nan')):.3f}" f"{'±' + format(summary['std_acc'], '.3f') if summary.get('reps', 1) > 1 else ''} | "
             f"- | {summary['p95']:.2f}s | in {summary['tokens_in'] / 1000:.0f}K / out {summary['tokens_out'] / 1000:.0f}K | {len(rows)} 题，k_context={args.k_context}，k_retrieve={args.k_retrieve}，expand=±{args.expand}"
-            f"{'，repeat=' + str(args.repeat) if args.repeat > 1 else ''}{'，qe=on' if args.query_expand else ''}{'，w=' + args.rrf_weights if args.rrf_weights != '1,1' else ''}{'，prompt=' + args.prompt if args.prompt != 'v1' else ''} |\n"
+            f"{'，repeat=' + str(args.repeat) if args.repeat > 1 else ''}{'，qe=on' if args.query_expand else ''}{'，qe_dense' if args.qe_dense else ''}{'（max_chars=' + str(args.max_chars) + '）' if args.max_chars != 6000 else ''}{'，w=' + args.rrf_weights if args.rrf_weights != '1,1' else ''}{'，prompt=' + args.prompt if args.prompt != 'v1' else ''} |\n"
         )
         with (ROOT / "results" / "RESULTS.md").open("a", encoding="utf-8") as f:
             f.write(line)
