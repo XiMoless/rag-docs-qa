@@ -1,7 +1,10 @@
 # ModelScope 创空间依赖（Gradio SDK）
-# 基础镜像通常已带 CPU 版 torch；若构建时报找不到 torch，再打开下面这行
-# --extra-index-url https://download.pytorch.org/whl/cpu
-gradio==6.32.0
+# 用国内镜像，避免构建时从 pypi.org / download.pytorch.org 拉大包卡住
+-i https://mirrors.aliyun.com/pypi/simple
+--extra-index-url https://mirrors.aliyun.com/pytorch-wheels/cpu
+
+# gradio 版本跟随平台默认 SDK（6.29.x），不要 pin 到更高版本，否则与镜像内置冲突
+gradio==6.29.1
 sentence-transformers==5.1.1
 rank-bm25==0.2.2
 numpy==2.0.1
