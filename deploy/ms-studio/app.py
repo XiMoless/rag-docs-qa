@@ -53,7 +53,11 @@ TRANSLATE_PROMPT = """把下面的中文技术问题翻译成用于检索英文�
 # ---------------------------------------------------------------- 资源加载
 def _load() -> tuple[list[dict], np.ndarray, dict]:
     chunks = [json.loads(line) for line in (ART / "chunks.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
-    vecs = np.load(ART / "vectors.npy").astype(np.float32)
+    try:
+        vecs = np.load(ART / "vectors.npy").astype(np.float32)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] vectors.npy 不可用（{exc}），本次只用 BM25 检索")
+        vecs = None
     meta = json.loads((ART / "meta.json").read_text(encoding="utf-8"))
     return chunks, vecs, meta
 
@@ -104,7 +108,13 @@ def api_client():
 
 # ---------------------------------------------------------------- 检索
 def search_vector(q: str, k: int) -> list[tuple[int, float]]:
-    emb = get_embedder().encode([q], normalize_embeddings=True, convert_to_numpy=True)[0].astype(np.float32)
+    if VECS is None:
+        return []
+    try:
+        emb = get_embedder().encode([q], normalize_embeddings=True, convert_to_numpy=True)[0].astype(np.float32)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] dense 通道不可用（{exc}），退回 BM25")
+        return []
     scores = VECS @ emb
     top = np.argsort(-scores)[:k]
     return [(int(i), float(scores[i])) for i in top]
@@ -126,10 +136,9 @@ def rrf(q: str, k: int, kw_query: str | None = None, rrf_k: int = 60) -> list[tu
     问题，原句能直接把 Durability modes 排到第一，而纯关键词反而被 interrupt/resume 的讲法带走。
     所以两路向量都保留，让 RRF 去融合；BM25 只用英文关键词（中文对它等于零重叠）。
     """
-    channels = [search_vector(q, k)]
+    channels = [c for c in [search_vector(q, k)] if c]
     if kw_query:
-        channels.append(search_vector(kw_query, k))
-        channels.append(search_bm25(kw_query, k))
+        channels += [c for c in [search_vector(kw_query, k), search_bm25(kw_query, k)] if c]
     fused: dict[int, float] = {}
     for hits in channels:
         for rank, (idx, _) in enumerate(hits, start=1):
@@ -229,6 +238,13 @@ def answer(question: str, mode: str, k: int, use_translate: bool):
     return f"{reply}\n\n---\n{meta_line}", rows(hits), context
 
 
+_DENSE_ON = VECS is not None
+_CHAIN = ("中文问题 → DeepSeek 译成英文关键词 → 英文向量 + BM25 两路各取候选 → RRF 融合 → 去重取前 5 段"
+          if _DENSE_ON else
+          "中文问题 → DeepSeek 译成英文关键词 → BM25 召回候选 → 去重取前 5 段")
+_MODE_NOTE = ("" if _DENSE_ON else
+              "\n> 本次运行未启用向量通道（免费 CPU 不装 torch），只用 BM25 + 查询翻译；主实验的检索指标不适用于本页。")
+
 BANNER = f"""
 ### LangChain 文档问答 RAG（演示版 · ModelScope 创空间）
 
@@ -241,8 +257,8 @@ BANNER = f"""
 
 语料：LangChain 官方文档 OSS 部分 {META['count']} 个 chunk，切分方式 {META['chunking']}。
 
-检索链路：中文问题 → DeepSeek 译成英文关键词 → 英文向量 + BM25 两路各取候选 → RRF 融合 → 去重取前 {5} 段
-→ DeepSeek 只依据片段生成答案（没答案就说没找到）。
+检索链路：{_CHAIN}
+→ DeepSeek 只依据片段生成答案（没答案就说没找到）。{_MODE_NOTE}
 """
 
 EXAMPLES = [

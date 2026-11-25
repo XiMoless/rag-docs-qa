@@ -1,12 +1,11 @@
 # ModelScope 创空间依赖（Gradio SDK）
-# 用国内镜像，避免构建时从 pypi.org / download.pytorch.org 拉大包卡住
--i https://mirrors.aliyun.com/pypi/simple
---extra-index-url https://mirrors.aliyun.com/pytorch-wheels/cpu
+# 刻意只留轻量包：不用 torch / sentence-transformers，构建时间从十几分钟降到一两分钟。
+# app.py 自带降级：没有向量模型时只用 BM25 + 查询翻译（检索质量略低于主实验，页面已注明）。
+# 若想在演示站也启用向量通道，放开下面两行（会下载 torch，构建明显变慢）：
+# sentence-transformers==5.1.1
+# modelscope>=1.20.0
 
-# gradio 版本跟随平台默认 SDK（6.29.x），不要 pin 到更高版本，否则与镜像内置冲突
 gradio==6.29.1
-sentence-transformers==5.1.1
 rank-bm25==0.2.2
 numpy==2.0.1
 openai==2.6.0
-modelscope>=1.20.0
