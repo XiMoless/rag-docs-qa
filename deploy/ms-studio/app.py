@@ -51,6 +51,13 @@ TRANSLATE_PROMPT = """把下面的中文技术问题翻译成用于检索英文�
 
 
 # ---------------------------------------------------------------- 资源加载
+def _env_diag() -> None:
+    """启动时打印环境变量诊断，只输出变量名与是否存在，绝不输出值。"""
+    names = sorted(k for k in os.environ if ("KEY" in k.upper() or "SECRET" in k.upper() or "TOKEN" in k.upper()))
+    print(f"[env] 相关变量名: {names}")
+    print(f"[env] DEEPSEEK_API_KEY 已配置: {bool(os.environ.get('DEEPSEEK_API_KEY', '').strip())}")
+
+
 def _load() -> tuple[list[dict], np.ndarray, dict]:
     chunks = [json.loads(line) for line in (ART / "chunks.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
     try:
@@ -108,7 +115,7 @@ def api_client():
 
 # ---------------------------------------------------------------- 检索
 def search_vector(q: str, k: int) -> list[tuple[int, float]]:
-    if VECS is None:
+    if not _DENSE_ON:
         return []
     try:
         emb = get_embedder().encode([q], normalize_embeddings=True, convert_to_numpy=True)[0].astype(np.float32)
@@ -238,10 +245,26 @@ def answer(question: str, mode: str, k: int, use_translate: bool):
     return f"{reply}\n\n---\n{meta_line}", rows(hits), context
 
 
-_DENSE_ON = VECS is not None
+def _dense_available() -> bool:
+    """向量文件在 + 真的能 import sentence-transformers，才算 dense 可用。"""
+    if VECS is None:
+        return False
+    try:
+        import sentence_transformers  # noqa: F401
+
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] sentence-transformers 不可用（{exc}），本次只用 BM25")
+        return False
+
+
+_env_diag()
+_DENSE_ON = _dense_available()
 _CHAIN = ("中文问题 → DeepSeek 译成英文关键词 → 英文向量 + BM25 两路各取候选 → RRF 融合 → 去重取前 5 段"
           if _DENSE_ON else
           "中文问题 → DeepSeek 译成英文关键词 → BM25 召回候选 → 去重取前 5 段")
+_NO_KEY_NOTE = ("" if os.environ.get("DEEPSEEK_API_KEY", "").strip() else
+                "\n> ⚠️ 本页未读到 `DEEPSEEK_API_KEY`：只展示检索结果、不生成回答。请在「设置 → 环境变量」添加后重启空间。")
 _MODE_NOTE = ("" if _DENSE_ON else
               "\n> 本次运行未启用向量通道（免费 CPU 不装 torch），只用 BM25 + 查询翻译；主实验的检索指标不适用于本页。")
 
@@ -258,7 +281,7 @@ BANNER = f"""
 语料：LangChain 官方文档 OSS 部分 {META['count']} 个 chunk，切分方式 {META['chunking']}。
 
 检索链路：{_CHAIN}
-→ DeepSeek 只依据片段生成答案（没答案就说没找到）。{_MODE_NOTE}
+→ DeepSeek 只依据片段生成答案（没答案就说没找到）。{_MODE_NOTE}{_NO_KEY_NOTE}
 """
 
 EXAMPLES = [
