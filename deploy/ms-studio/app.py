@@ -51,11 +51,22 @@ TRANSLATE_PROMPT = """把下面的中文技术问题翻译成用于检索英文�
 
 
 # ---------------------------------------------------------------- 资源加载
+KEY_ENV_NAMES = ("DEEPSEEK_API_KEY", "DEEPSEEK_KEY", "DEEPSEEK_APIKEY", "DS_API_KEY")
+
+
+def api_key() -> str:
+    """按常见命名依次找 key，找不到返回空串。"""
+    for name in KEY_ENV_NAMES:
+        val = os.environ.get(name, "").strip()
+        if val:
+            return val
+    return ""
+
 def _env_diag() -> None:
     """启动时打印环境变量诊断，只输出变量名与是否存在，绝不输出值。"""
     names = sorted(k for k in os.environ if ("KEY" in k.upper() or "SECRET" in k.upper() or "TOKEN" in k.upper()))
     print(f"[env] 相关变量名: {names}")
-    print(f"[env] DEEPSEEK_API_KEY 已配置: {bool(os.environ.get('DEEPSEEK_API_KEY', '').strip())}")
+    print(f"[env] key 已读到: {bool(api_key())}（查找名称: {KEY_ENV_NAMES}）")
 
 
 def _load() -> tuple[list[dict], np.ndarray, dict]:
@@ -105,7 +116,7 @@ def get_bm25():
 
 
 def api_client():
-    key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    key = api_key()
     if not key:
         return None
     from openai import OpenAI
@@ -263,7 +274,7 @@ _DENSE_ON = _dense_available()
 _CHAIN = ("中文问题 → DeepSeek 译成英文关键词 → 英文向量 + BM25 两路各取候选 → RRF 融合 → 去重取前 5 段"
           if _DENSE_ON else
           "中文问题 → DeepSeek 译成英文关键词 → BM25 召回候选 → 去重取前 5 段")
-_NO_KEY_NOTE = ("" if os.environ.get("DEEPSEEK_API_KEY", "").strip() else
+_NO_KEY_NOTE = ("" if api_key() else
                 "\n> ⚠️ 本页未读到 `DEEPSEEK_API_KEY`：只展示检索结果、不生成回答。请在「设置 → 环境变量」添加后重启空间。")
 _MODE_NOTE = ("" if _DENSE_ON else
               "\n> 本次运行未启用向量通道（免费 CPU 不装 torch），只用 BM25 + 查询翻译；主实验的检索指标不适用于本页。")
