@@ -1,11 +1,12 @@
 # ModelScope 创空间依赖（Gradio SDK）
-# 刻意只留轻量包：不用 torch / sentence-transformers，构建时间从十几分钟降到一两分钟。
-# app.py 自带降级：没有向量模型时只用 BM25 + 查询翻译（检索质量略低于主实验，页面已注明）。
-# 若想在演示站也启用向量通道，放开下面两行（会下载 torch，构建明显变慢）：
+# 只写「平台镜像里没有」的包。gradio 由平台基础镜像自带（当前 SDK 6.29.1），
+# 这里再 pin 一次会和镜像内置的定制版冲突，是构建镜像失败的常见原因，所以不写。
+# 刻意不装 torch / sentence-transformers：免费 CPU 上装 CUDA 版 torch 会十几分钟装不完。
+# app.py 自带降级：没有向量模型时只用 BM25 + 查询翻译（页面已注明不引用检索指标）。
+# 想在演示站启用向量通道，放开下面两行（会下载 torch，构建明显变慢）：
 # sentence-transformers==5.1.1
 # modelscope>=1.20.0
 
-gradio==6.29.1
 rank-bm25==0.2.2
 numpy==2.0.1
 openai==2.6.0
